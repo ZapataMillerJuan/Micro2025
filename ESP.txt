@@ -1,0 +1,2 @@
+Para la maquina de estado de la ESP nos conviene hacer un AT cada 3seg, y si se quiere mandar un cmd, resetear el timeout de el AT y esperar respuesta.
+Tenemos que saber difereniar entre respuestas pedidas y no pedidas, pedidas significa que es una respuesta a un cmd que nosotros le mandamos, no pedida es una respuesta a un evento que nosotros no mandamos, por ejemplo un DISCONNECT. Las respuestas pedidas van a venir con el formato \r\nCMD\r\n. y las no pedidas vienen CMD\r\n.
