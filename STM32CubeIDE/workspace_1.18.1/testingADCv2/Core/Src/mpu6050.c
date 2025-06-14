@@ -1,0 +1,171 @@
+
+#include <math.h>
+#include "mpu6050.h"
+
+
+const long Accel_Z_corrector = 14418.0;
+static uint8_t (*I2C_Recive)(uint16_t DevAddress,uint16_t reg,uint8_t *pData, uint16_t Size);
+static uint8_t (*I2C_Transmit)(uint16_t DevAddress,uint16_t reg,uint8_t *pData, uint16_t Size);
+static uint8_t (*I2C_Recive_Blocking)(uint16_t DevAddress, uint16_t MemAddress, uint16_t MemAddSize, uint8_t *pData, uint16_t Size);
+static uint8_t (*I2C_Transmit_Blocking)(uint16_t Dev_Address, uint8_t Mem_Adress, uint8_t Mem_AddSize, uint8_t *p_Data, uint16_t _Size, uint32_t _Timeout);
+
+
+
+Kalman_t KalmanX = {
+        .Q_angle = 0.001f,
+        .Q_bias = 0.003f,
+        .R_measure = 0.03f
+};
+
+Kalman_t KalmanY = {
+        .Q_angle = 0.001f,
+        .Q_bias = 0.003f,
+        .R_measure = 0.03f,
+};
+
+uint8_t MPU6050_Init(MPU6050_t *MpuData){
+
+    uint8_t check;
+    uint8_t Data;
+
+    MpuData->DMAREADY=1;
+    // check device ID WHO_AM_I
+
+    I2C_Recive_Blocking(MPU6050_ADDR, WHO_AM_I_REG, 1, &check, 1);
+    if (check == 0x68)  // 0x68 will be returned by the sensor if everything goes well
+    {
+        // power management register 0X6B we should write all 0's to wake the sensor up
+        Data = 0x00;
+        I2C_Transmit_Blocking(MPU6050_ADDR, PWR_MGMT_1_REG, 1, &Data, 1,1000);
+
+        // Set DATA RATE of 1KHz by writing SMPLRT_DIV register
+        Data = 0x07;
+        I2C_Transmit_Blocking(MPU6050_ADDR, SMPLRT_DIV_REG, 1, &Data, 1,1000);
+
+        // Set accelerometer configuration in ACCEL_CONFIG Register
+        // XA_ST=0,YA_ST=0,ZA_ST=0, FS_SEL=0 -> � 2g
+        Data = 0x00;
+        I2C_Transmit_Blocking(MPU6050_ADDR, ACCEL_CONFIG_REG, 1, &Data, 1,1000);
+
+        // Set Gyroscopic configuration in GYRO_CONFIG Register
+        // XG_ST=0,YG_ST=0,ZG_ST=0, FS_SEL=0 -> � 250 �/s
+        Data = 0x00;
+        I2C_Transmit_Blocking(MPU6050_ADDR, GYRO_CONFIG_REG, 1, &Data, 1,1000);
+
+        Data = 0x03;
+        I2C_Transmit_Blocking(MPU6050_ADDR, LOWPASS_CONFIG, 1, &Data, 1,1000);
+
+        return 0;
+    }
+    return 1;
+}
+
+
+void MPU6050_Read_Accel(MPU6050_t *MpuData){
+
+    // Read 6 BYTES of data starting from ACCEL_XOUT_H register
+
+    if(!MpuData->DMAREADY)
+    	return;
+
+    I2C_Recive(MPU6050_ADDR, ACCEL_XOUT_H_REG, MpuData->Rec_Data, 6);
+
+
+    /*** convert the RAW values into acceleration in 'g'
+         we have to divide according to the Full scale value set in FS_SEL
+         I have configured FS_SEL = 0. So I am dividing by 16384.0
+         for more details check ACCEL_CONFIG Register              ****/
+
+//    MpuData.Ax = MpuData.Accel_X_RAW / 16384.0;
+//    MpuData.Ay = MpuData.Accel_Y_RAW / 16384.0;
+//    MpuData.Az = MpuData.Accel_Z_RAW / Accel_Z_corrector;
+}
+
+//void MPU6050_Read_Gyro(MPU6050_t *MpuData){
+//    uint8_t Rec_Data[6];
+//
+//    // Read 6 BYTES of data starting from GYRO_XOUT_H register
+//    if(!DMAREADY)
+//        	return;
+//
+//    I2C_Recive(MPU6050_ADDR, GYRO_XOUT_H_REG,Rec_Data, 6);
+//
+//    MpuData->Gx = ((int16_t) (Rec_Data[0] << 8 | Rec_Data[1]))/ 131.0;
+//    MpuData->Gy = ((int16_t) (Rec_Data[2] << 8 | Rec_Data[3]))/ 131.0;
+//    MpuData->Gz = ((int16_t) (Rec_Data[4] << 8 | Rec_Data[5]))/ 131.0;
+//
+//    /*** convert the RAW values into dps (�/s)
+//         we have to divide according to the Full scale value set in FS_SEL
+//         I have configured FS_SEL = 0. So I am dividing by 131.0
+//         for more details check GYRO_CONFIG Register              ****/
+//
+////    MpuData.Gx = MpuData.Gyro_X_RAW / 131.0;
+////    MpuData.Gy = MpuData.Gyro_Y_RAW / 131.0;
+////    MpuData.Gz = MpuData.Gyro_Z_RAW / 131.0;
+//}
+//
+//void MPU6050_Read_Temp(MPU6050_t *DataStruct) {
+//    uint8_t Rec_Data[2];
+//    int16_t temp;
+//
+//    // Read 2 BYTES of data starting from TEMP_OUT_H_REG register
+//
+//    I2C_Recive(MPU6050_ADDR, TEMP_OUT_H_REG,Rec_Data, 2);
+//
+//    temp = (int16_t) (Rec_Data[0] << 8 | Rec_Data[1]);
+//    MpuData.Temperature = (float) ((int16_t) temp / (float) 340.0 + (float) 36.53);
+//}
+
+void MPU6050_Read_All(MPU6050_t *MpuData) {
+
+    // Read 14 BYTES of data starting from ACCEL_XOUT_H register
+
+    if(!MpuData->DMAREADY)
+    	return;
+
+    I2C_Recive(MPU6050_ADDR, ACCEL_XOUT_H_REG,MpuData->Rec_Data, 14);
+    MpuData->DMAREADY=0;
+
+
+}
+
+
+void MPU6050_NonBlocking_DMA(uint8_t (*Master_Transmit)(uint16_t DevAddress,uint16_t reg,uint8_t *pData, uint16_t Size),uint8_t (*Master_Recive)(uint16_t DevAddress,uint16_t reg,uint8_t *pData, uint16_t Size)){
+	I2C_Transmit = Master_Transmit;
+	I2C_Recive = Master_Recive;
+}
+void MPU6050_I2C_Blocking(uint8_t (*Recive_Blocking)(uint16_t DevAddress, uint16_t MemAddress, uint16_t MemAddSize, uint8_t *pData, uint16_t Size),uint8_t (*Transmit_Blocking)(uint16_t Dev_Address, uint8_t Mem_Adress, uint8_t Mem_AddSize, uint8_t *p_Data, uint16_t _Size, uint32_t _Timeout)){
+	I2C_Recive_Blocking = Recive_Blocking;
+	I2C_Transmit_Blocking = Transmit_Blocking;
+}
+void MPU6050_MAF(MPU6050_t *mpu){ //Moving Average Filter
+	if(mpu->MAF.isOn){
+		mpu->MAF.isOn = 0;
+		for(uint8_t channel = 0; channel < NUM_AXIS; channel++){
+			mpu->MAF.sumData[channel] -= mpu->MAF.mediaBuffer[mpu->MAF.index][channel];
+			mpu->MAF.sumData[channel] += mpu->MAF.rawData[channel];
+			mpu->MAF.mediaBuffer[mpu->MAF.index][channel] = mpu->MAF.rawData[channel];
+			mpu->MAF.filtredData[channel] = (mpu->MAF.sumData[channel] >> NUM_MAF_BITS);
+		}
+		mpu->MAF.index++;
+		mpu->MAF.index &= (NUM_MAF - 1);
+
+		// ACC: CALCULATE TRUE ACCELERATION
+
+		mpu->MAF.filtredData[0] = mpu->MAF.filtredData[0] - mpu->Accel.X_Offset;
+		mpu->MAF.filtredData[1] = mpu->MAF.filtredData[1] - mpu->Accel.Y_Offset;
+		mpu->MAF.filtredData[2]  = mpu->MAF.filtredData[2] - mpu->Accel.Z_Offset;
+		// GYR: CALCULATE TRUE ACCELERATION
+		mpu->MAF.filtredData[3] = mpu->MAF.filtredData[3] - mpu->Gyro.X_Offset;
+		mpu->MAF.filtredData[4] = mpu->MAF.filtredData[4] - mpu->Gyro.Y_Offset;
+		mpu->MAF.filtredData[5] = mpu->MAF.filtredData[5] - mpu->Gyro.Z_Offset;
+
+		mpu->Accel.X_filtered = mpu->MAF.filtredData[0] - mpu->Accel.X_Offset;
+		mpu->Accel.Y_filtered = mpu->MAF.filtredData[1] - mpu->Accel.Y_Offset;
+		mpu->Accel.Z_filtered  = mpu->MAF.filtredData[2] - mpu->Accel.Z_Offset;
+		// GYR: CALCULATE TRUE ACCELERATION
+		mpu->Gyro.X_filtered = mpu->MAF.filtredData[3] - mpu->Gyro.X_Offset;
+		mpu->Gyro.Y_filtered = mpu->MAF.filtredData[4] - mpu->Gyro.Y_Offset;
+		mpu->Gyro.Z_filtered = mpu->MAF.filtredData[5] - mpu->Gyro.Z_Offset;
+	}
+}

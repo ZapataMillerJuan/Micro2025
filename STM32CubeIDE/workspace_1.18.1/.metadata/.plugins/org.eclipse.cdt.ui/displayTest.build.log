@@ -1,0 +1,22 @@
+23:41:50 **** Incremental Build of configuration Debug for project displayTest ****
+make -j12 all 
+arm-none-eabi-gcc -o "displayTest.elf" @"objects.list"   -mcpu=cortex-m4 -T"C:\Users\juanz\OneDrive\Escritorio\FACULTAD\MICROCONTROLADORES\Codes\Micro2025\display\STM32F411CEUX_FLASH.ld" --specs=nosys.specs -Wl,-Map="displayTest.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -u _printf_float -u _scanf_float -Wl,--start-group -lc -lm -Wl,--end-group
+Finished building target: displayTest.elf
+ 
+arm-none-eabi-size  displayTest.elf 
+arm-none-eabi-objdump -h -S displayTest.elf  > "displayTest.list"
+arm-none-eabi-objcopy  -O ihex displayTest.elf  "displayTest.hex"
+   text	   data	    bss	    dec	    hex	filename
+  34368	    468	   3116	  37952	   9440	displayTest.elf
+arm-none-eabi-objcopy  -O binary displayTest.elf  "displayTest.bin"
+Finished building: default.size.stdout
+ 
+Finished building: displayTest.hex
+Finished building: displayTest.bin
+ 
+ 
+Finished building: displayTest.list
+ 
+
+23:41:51 Build Finished. 0 errors, 0 warnings. (took 615ms)
+

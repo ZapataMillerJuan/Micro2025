@@ -1,0 +1,986 @@
+/* USER CODE BEGIN Header */
+/**
+  ******************************************************************************
+  * @file           : main.c
+  * @brief          : Main program body
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2025 STMicroelectronics.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  */
+/* USER CODE END Header */
+/* Includes ------------------------------------------------------------------*/
+#include "main.h"
+#include "usb_device.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+#include "usbd_cdc_if.h"
+#include "util.h"
+#include "fonts.h"
+#include "ssd1306_oled.h"
+#include "FCAL2.h"
+#include "mpu6050.h"
+#include "motores.h"
+#include <stdlib.h>
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+#define ADC_MAX_CHANNELS 	8
+#define RXBUFSIZE           256
+#define TXBUFSIZE           256
+#define TRUE 				1
+#define FALSE				0
+#define SISINIT  			Flag.bits.bit0
+#define RECIVEDMA 			Flag.bits.bit2
+#define SENDDMA 			Flag.bits.bit3
+#define DMABUSY				Flag.bits.bit4
+//#define RINGBUFFLENGHTH 	256
+/* USER CODE END PM */
+
+/* Private variables ---------------------------------------------------------*/
+ADC_HandleTypeDef hadc1;
+DMA_HandleTypeDef hdma_adc1;
+
+I2C_HandleTypeDef hi2c1;
+DMA_HandleTypeDef hdma_i2c1_tx;
+DMA_HandleTypeDef hdma_i2c1_rx;
+
+TIM_HandleTypeDef htim3;
+TIM_HandleTypeDef htim10;
+TIM_HandleTypeDef htim11;
+
+/* USER CODE BEGIN PV */
+volatile _sRx dataRx;
+_sTx dataTx;
+uint8_t BufUSBTx[256];
+volatile uint8_t buffRx[RXBUFSIZE];
+uint8_t buffTx[TXBUFSIZE];
+uint16_t RINGBUFFLENGTH = 256;
+MPU6050_t mpuValues;
+uint8_t nBytesTx;
+uint8_t is10ms = 	40;
+uint8_t is100ms = 	10;
+uint8_t is250ms = 	25;
+uint16_t adcraws[ADC_MAX_CHANNELS];
+uint16_t adcUSB[ADC_MAX_CHANNELS];
+_sEng motorL,motorR;
+_uWord myWord;
+_uFlag Flag;
+const uint8_t Index_to_Bar[] = {
+    21, 22, 23, 24, 25, 26, 27, 28, 29,
+    30, 31, 32, 33, 34, 35, 36, 37, 38, 39,
+    40, 41, 42, 43, 44, 45, 46, 47, 48, 49,
+    50, 51, 52, 53, 54, 55, 56, 57, 58, 59
+};
+
+const uint16_t ADC_to_Index[] = {
+  105,  210,  315,  420,  525,  630,  735,  840,  945,
+  1050, 1155, 1260, 1365, 1470, 1575, 1680, 1785, 1890, 1995,
+  2100, 2205, 2310, 2415, 2520, 2625, 2730, 2835, 2940, 3045,
+  3150, 3255, 3360, 3465, 3570, 3675, 3780, 3885, 3990, 4095
+};
+/* USER CODE END PV */
+
+/* Private function prototypes -----------------------------------------------*/
+void SystemClock_Config(void);
+static void MX_GPIO_Init(void);
+static void MX_DMA_Init(void);
+static void MX_ADC1_Init(void);
+static void MX_TIM11_Init(void);
+static void MX_TIM10_Init(void);
+static void MX_I2C1_Init(void);
+static void MX_TIM3_Init(void);
+/* USER CODE BEGIN PFP */
+void USBRxData(uint8_t *buf, uint32_t Len);
+uint8_t I2C_DMA_Transmit(uint16_t Dev_Address,uint16_t reg,uint8_t *p_Data, uint16_t _Size);
+uint8_t I2C_1_Abstract_Master_Transmit_Blocking(uint16_t Dev_Address, uint8_t *p_Data, uint16_t _Size, uint32_t _Timeout);
+uint8_t I2C_RBlocking(uint16_t DevAddress, uint16_t MemAddress, uint16_t MemAddSize, uint8_t *pData, uint16_t Size);
+uint8_t I2C_1_Abstract_Mem_Write_Blocking(uint16_t Dev_Address, uint8_t Mem_Adress, uint8_t Mem_AddSize, uint8_t *p_Data, uint16_t _Size, uint32_t _Timeout);
+uint8_t I2C_DMA_Recive(uint16_t Dev_Address,uint16_t reg,uint8_t *p_Data, uint16_t _Size);
+uint8_t putHeaderOnTx(_sTx  *dataTx, _eCmd ID, uint8_t frameLength);
+uint8_t putByteOnTx(_sTx    *dataTx, uint8_t byte);
+uint8_t getByteFromRx(_sRx *dataRx, uint8_t iniPos, uint8_t finalPos);
+void decodeHeader(_sRx *dataRx);
+void decodeCommand(_sRx *dataRx, _sTx *dataTx);
+void serialTask(_sRx *dataRx, _sTx *dataTx);
+void DMA_Task();
+void Engines_task();
+/* USER CODE END PFP */
+
+/* Private user code ---------------------------------------------------------*/
+/* USER CODE BEGIN 0 */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim){
+	if(htim->Instance == TIM11){
+		HAL_ADC_Start_DMA(&hadc1, (uint32_t*)&adcraws, 8);
+		if(is10ms){
+			is10ms--;
+
+		}
+	}
+	if(htim->Instance == TIM10){
+		SSD1306_DMAREADY(FALSE);
+		MPU6050_Read_All(&mpuValues);
+		mpuValues.DMAREADY=1;
+	}
+}
+void HAL_I2C_MemTxCpltCallback(I2C_HandleTypeDef *hi2c){
+	if(hi2c->Devaddress==SSD1306_I2C_ADDR){
+		SSD1306_DMAREADY(TRUE);
+	}
+}
+void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c){
+	if(hi2c->Devaddress==MPU6050_ADDR){
+		mpuValues.MAF.rawData[0] = (int16_t) (mpuValues.Rec_Data[0] << 8 | mpuValues.Rec_Data[1]);
+		mpuValues.MAF.rawData[1] = (int16_t) (mpuValues.Rec_Data[2] << 8 | mpuValues.Rec_Data[3]);
+		mpuValues.MAF.rawData[2] = (int16_t) (mpuValues.Rec_Data[4] << 8 | mpuValues.Rec_Data[5]);
+		mpuValues.MAF.rawData[3] = (int16_t) (mpuValues.Rec_Data[8] << 8 | mpuValues.Rec_Data[9]);
+		mpuValues.MAF.rawData[4] = (int16_t) (mpuValues.Rec_Data[10]<< 8 | mpuValues.Rec_Data[11]);
+		mpuValues.MAF.rawData[5] = (int16_t) (mpuValues.Rec_Data[12]<< 8 | mpuValues.Rec_Data[13]);
+		SSD1306_DMAREADY(TRUE);
+
+	}
+}
+void Engines_task(){
+
+	en_HandlerENG(&motorR, 55000, 0);
+	en_HandlerENG(&motorL, 40000, 0);
+	switch(motorR.estado){
+			case BRAKE:
+				HAL_GPIO_WritePin(MOTOR2_OUT_A_GPIO_Port, MOTOR2_OUT_A_Pin, 1);
+				HAL_GPIO_WritePin(MOTOR2_OUT_B_GPIO_Port, MOTOR2_OUT_B_Pin, 1);
+				break;
+
+			case FRONT:
+				HAL_GPIO_WritePin(MOTOR2_OUT_A_GPIO_Port, MOTOR2_OUT_A_Pin, 1);
+				HAL_GPIO_WritePin(MOTOR2_OUT_B_GPIO_Port, MOTOR2_OUT_B_Pin, 0);
+				break;
+
+			case BACK:
+				HAL_GPIO_WritePin(MOTOR2_OUT_A_GPIO_Port, MOTOR2_OUT_A_Pin, 0);
+				HAL_GPIO_WritePin(MOTOR2_OUT_B_GPIO_Port, MOTOR2_OUT_B_Pin, 1);
+				break;
+
+			case FREE:
+				HAL_GPIO_WritePin(MOTOR2_OUT_A_GPIO_Port, MOTOR2_OUT_A_Pin, 0);
+				HAL_GPIO_WritePin(MOTOR2_OUT_B_GPIO_Port, MOTOR2_OUT_B_Pin, 0);
+				break;
+			default:
+				break;
+			}
+	switch(motorL.estado){
+		case BRAKE:
+			HAL_GPIO_WritePin(MOTOR_OUT_A_GPIO_Port, MOTOR_OUT_A_Pin, 1);
+			HAL_GPIO_WritePin(MOTOR_OUT_B_GPIO_Port, MOTOR_OUT_B_Pin, 1);
+			break;
+
+		case FRONT:
+			HAL_GPIO_WritePin(MOTOR_OUT_A_GPIO_Port, MOTOR_OUT_A_Pin, 1);
+			HAL_GPIO_WritePin(MOTOR_OUT_B_GPIO_Port, MOTOR_OUT_B_Pin, 0);
+			break;
+
+		case BACK:
+			HAL_GPIO_WritePin(MOTOR_OUT_A_GPIO_Port, MOTOR_OUT_A_Pin, 0);
+			HAL_GPIO_WritePin(MOTOR_OUT_B_GPIO_Port, MOTOR_OUT_B_Pin, 1);
+			break;
+
+		case FREE:
+			HAL_GPIO_WritePin(MOTOR_OUT_A_GPIO_Port, MOTOR_OUT_A_Pin, 0);
+			HAL_GPIO_WritePin(MOTOR_OUT_B_GPIO_Port, MOTOR_OUT_B_Pin, 0);
+			break;
+		default:
+			break;
+	}
+		__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_1, motorL.speed);
+		__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_2, motorR.speed);
+}
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc){
+	adcUSB[0] = adcraws[0];
+	adcUSB[1] = adcraws[1];
+	adcUSB[2] = adcraws[2];
+	adcUSB[3] = adcraws[3];
+	adcUSB[4] = adcraws[4];
+	adcUSB[5] = adcraws[5];
+	adcUSB[6] = adcraws[6];
+	adcUSB[7] = adcraws[7];
+}
+void USBRxData(uint8_t *buf, uint32_t Len){
+	for(nBytesTx = 0;nBytesTx<Len;nBytesTx++){
+			dataRx.buff[dataRx.indexW++]= buf[nBytesTx];
+		    dataRx.indexW &= dataRx.mask;
+		}
+}
+
+void decodeHeader(_sRx *dataRx)
+{
+    uint8_t auxIndex=dataRx->indexW;
+    while(dataRx->indexR != auxIndex){
+        switch(dataRx->header)
+        {
+            case HEADER_U:
+                if(dataRx->buff[dataRx->indexR] == 'U'){
+                    dataRx->header = HEADER_N;
+                    dataRx->timeOut = 5;
+                }
+            break;
+            case HEADER_N:
+                if(dataRx->buff[dataRx->indexR] == 'N'){
+                    dataRx->header = HEADER_E;
+                }else{
+                    if(dataRx->buff[dataRx->indexR] != 'U'){
+                        dataRx->header = HEADER_U;
+                        dataRx->indexR--;
+                    }
+                }
+            break;
+            case HEADER_E:
+                if(dataRx->buff[dataRx->indexR] == 'E'){
+                    dataRx->header = HEADER_R;
+                }else{
+                    dataRx->header = HEADER_U;
+                    dataRx->indexR--;
+                }
+            break;
+            case HEADER_R:
+                if(dataRx->buff[dataRx->indexR] == 'R'){
+                    dataRx->header = NBYTES;
+                }else{
+                    dataRx->header = HEADER_U;
+                    dataRx->indexR--;
+                }
+            break;
+            case NBYTES:
+                dataRx->nBytes=dataRx->buff[dataRx->indexR];
+                dataRx->header = TOKEN;
+            break;
+            case TOKEN:
+                if(dataRx->buff[dataRx->indexR] == ':'){
+                    dataRx->header = PAYLOAD;
+                    dataRx->indexData = dataRx->indexR+1;
+                    dataRx->indexData &= dataRx->mask;
+                    dataRx->chk = 0;
+                    dataRx->chk ^= ('U' ^'N' ^'E' ^'R' ^dataRx->nBytes ^':') ;
+                }else{
+                    dataRx->header = HEADER_U;
+                    dataRx->indexR--;
+                }
+            break;
+            case PAYLOAD:
+                dataRx->nBytes--;
+                if(dataRx->nBytes>0){
+                   dataRx->chk ^= dataRx->buff[dataRx->indexR];
+                }else{
+                    dataRx->header = HEADER_U;
+                    if(dataRx->buff[dataRx->indexR] == dataRx->chk)
+                        dataRx->isComannd = TRUE;
+                }
+            break;
+            default:
+                dataRx->header = HEADER_U;
+            break;
+        }
+        dataRx->indexR++;
+        dataRx->indexR &= dataRx->mask;
+    }
+}
+void decodeCommand(_sRx *dataRx, _sTx *dataTx)
+{
+    //int32_t motorSpeed, auxSpeed;
+   // int8_t angleSource;
+    //uint32_t servoPrevio=miServo.currentValue;
+    switch(dataRx->buff[dataRx->indexData]){
+        case ALIVE:
+            putHeaderOnTx(dataTx, ALIVE, 2);
+            putByteOnTx(dataTx, ACK );
+            putByteOnTx(dataTx, dataTx->chk);
+        break;
+        case DATA:
+        	myWord.ui16[0] = adcUSB[0];
+        	putHeaderOnTx(dataTx, DATA, 29);
+        	putByteOnTx(dataTx, myWord.ui8[0]);
+        	putByteOnTx(dataTx, myWord.ui8[1]);
+        	myWord.ui16[0] = adcUSB[1];
+        	putByteOnTx(dataTx, myWord.ui8[0]);
+        	putByteOnTx(dataTx, myWord.ui8[1]);
+        	myWord.ui16[0] = adcUSB[2];
+        	putByteOnTx(dataTx, myWord.ui8[0]);
+        	putByteOnTx(dataTx, myWord.ui8[1]);
+        	myWord.ui16[0] = adcUSB[3];
+        	putByteOnTx(dataTx, myWord.ui8[0]);
+        	putByteOnTx(dataTx, myWord.ui8[1]);
+        	myWord.ui16[0] = adcUSB[4];
+        	putByteOnTx(dataTx, myWord.ui8[0]);
+        	putByteOnTx(dataTx, myWord.ui8[1]);
+        	myWord.ui16[0] = adcUSB[5];
+        	putByteOnTx(dataTx, myWord.ui8[0]);
+        	putByteOnTx(dataTx, myWord.ui8[1]);
+        	myWord.ui16[0] = adcUSB[6];
+        	putByteOnTx(dataTx, myWord.ui8[0]);
+        	putByteOnTx(dataTx, myWord.ui8[1]);
+        	myWord.ui16[0] = adcUSB[7];
+        	putByteOnTx(dataTx, myWord.ui8[0]);
+        	putByteOnTx(dataTx, myWord.ui8[1]);
+        	myWord.i16[0] = mpuValues.MAF.rawData[0];
+        	putByteOnTx(dataTx, myWord.i8[0]);
+        	putByteOnTx(dataTx, myWord.i8[1]);
+        	myWord.i16[0] = mpuValues.MAF.rawData[1];
+        	putByteOnTx(dataTx, myWord.i8[0]);
+        	putByteOnTx(dataTx, myWord.i8[1]);
+        	myWord.i16[0] = mpuValues.MAF.rawData[2];
+        	putByteOnTx(dataTx, myWord.i8[0]);
+        	putByteOnTx(dataTx, myWord.i8[1]);
+        	myWord.i16[0] = mpuValues.MAF.rawData[3];
+        	putByteOnTx(dataTx, myWord.i8[0]);
+        	putByteOnTx(dataTx, myWord.i8[1]);
+        	myWord.i16[0] = mpuValues.MAF.rawData[4];
+        	putByteOnTx(dataTx, myWord.i8[0]);
+        	putByteOnTx(dataTx, myWord.i8[1]);
+        	myWord.i16[0] = mpuValues.MAF.rawData[5];
+        	putByteOnTx(dataTx, myWord.i8[0]);
+        	putByteOnTx(dataTx, myWord.i8[1]);
+        	//putHeaderOnTx(dataTx, ALIVE, 2);
+        	//putByteOnTx(dataTx, ACK );
+        	putByteOnTx(dataTx, dataTx->chk);
+        	break;
+        default:
+            putHeaderOnTx(dataTx, (_eCmd)dataRx->buff[dataRx->indexData], 2);
+            putByteOnTx(dataTx,UNKNOWN );
+            putByteOnTx(dataTx, dataTx->chk);
+        break;
+    }
+}
+uint8_t putHeaderOnTx(_sTx  *dataTx, _eCmd ID, uint8_t frameLength)
+{
+    dataTx->chk = 0;
+    dataTx->buff[dataTx->indexW++]='U';
+    dataTx->indexW &= dataTx->mask;
+    dataTx->buff[dataTx->indexW++]='N';
+    dataTx->indexW &= dataTx->mask;
+    dataTx->buff[dataTx->indexW++]='E';
+    dataTx->indexW &= dataTx->mask;
+    dataTx->buff[dataTx->indexW++]='R';
+    dataTx->indexW &= dataTx->mask;
+    dataTx->buff[dataTx->indexW++]=frameLength+1;
+    dataTx->indexW &= dataTx->mask;
+    dataTx->buff[dataTx->indexW++]=':';
+    dataTx->indexW &= dataTx->mask;
+    dataTx->buff[dataTx->indexW++]=ID;
+    dataTx->indexW &= dataTx->mask;
+    dataTx->chk ^= (frameLength+1);
+    dataTx->chk ^= ('U' ^'N' ^'E' ^'R' ^ID ^':') ;
+    return  dataTx->chk;
+}
+uint8_t putByteOnTx(_sTx *dataTx, uint8_t byte)
+{
+    dataTx->buff[dataTx->indexW++]=byte;
+    dataTx->indexW &= dataTx->mask;
+    dataTx->chk ^= byte;
+    return dataTx->chk;
+}
+void SSD1306_Task(){
+
+	uint32_t guiaBarras;
+	//if(SISINIT){
+		SSD1306_Fill(WHITE);
+		SSD1306_GotoXY(90, 50);
+		for(uint8_t i = 0; i < 9; i++){
+			for(uint8_t j = 0; j < 45; j++){
+				if(adcUSB[i] <= ADC_to_Index[j]){
+					guiaBarras = 5 + i * 8;
+					SSD1306_DrawLine(guiaBarras, 59,  guiaBarras, Index_to_Bar[j], BLACK);
+					SSD1306_DrawLine(guiaBarras+1, 59,  guiaBarras+1, Index_to_Bar[j], BLACK);
+					break;
+			}
+		}
+	}
+}
+/* USER CODE END 0 */
+
+/**
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
+
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
+  HAL_Init();
+
+  /* USER CODE BEGIN Init */
+  //HAL_ADC_Start_DMA(hadc, pData, Length);
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
+  SystemClock_Config();
+
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
+  MX_GPIO_Init();
+  MX_DMA_Init();
+  MX_ADC1_Init();
+  MX_USB_DEVICE_Init();
+  MX_TIM11_Init();
+  MX_TIM10_Init();
+  MX_I2C1_Init();
+  MX_TIM3_Init();
+  /* USER CODE BEGIN 2 */
+  HAL_TIM_Base_Start_IT(&htim11);
+  //HAL_TIM_Base_Start_IT(&htim3);
+  HAL_TIM_Base_Start_IT(&htim10);
+  //HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
+  //HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_2);
+  //en_InitENG(&motorL, (uint16_t)htim3.Instance->ARR);
+  //en_InitENG(&motorR, (uint16_t)htim3.Instance->ARR);
+  Display_Set_I2C_Master_Transmit(&I2C_DMA_Transmit, &I2C_1_Abstract_Master_Transmit_Blocking);
+  MPU6050_I2C_Blocking(&I2C_RBlocking,&I2C_1_Abstract_Mem_Write_Blocking);
+  MPU6050_NonBlocking_DMA(&I2C_DMA_Transmit,&I2C_DMA_Recive);
+  SSD1306_Init();
+
+  CDC_Attach_Rx(USBRxData);
+  nBytesTx = 0;
+
+  dataRx.buff = (uint8_t *)buffRx;
+  dataRx.indexR = 0;
+  dataRx.indexW = 0;
+  dataRx.header = HEADER_U;
+  dataRx.mask = RXBUFSIZE - 1;
+
+  dataTx.bytesToTx = 0;
+  dataTx.buff = buffTx;
+  dataTx.indexR = 0;
+  dataTx.indexW = 0;
+  dataTx.mask = TXBUFSIZE -1;
+  //SSD1306_DrawBitmap(0, 0, imagen2, 128, 64, WHITE);
+  MPU6050_Init(&mpuValues);
+  mpuValues.DMAREADY = 1;
+  /* USER CODE END 2 */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
+  while (1)
+  {
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
+
+	  if(!is10ms){
+		  is10ms = 40;
+		  is100ms--;
+		  is250ms--;
+	  }
+	  if(!is100ms){
+		  is100ms = 10;
+		  SSD1306_Task();
+		  SSD1306_RefreshReady();
+
+	  }
+	  if(!is250ms){
+		  Engines_task();
+		  is250ms = 25;
+		  HAL_GPIO_TogglePin(LED_BUILTIN_GPIO_Port, LED_BUILTIN_Pin);
+	  }
+	  serialTask((_sRx *)&dataRx,&dataTx);
+	  //MPU6050_MAF(&mpuValues);
+	  SSD1306_UpdateScreen();
+	  //HAL_Delay(250);
+  }
+  /* USER CODE END 3 */
+}
+
+/**
+  * @brief System Clock Configuration
+  * @retval None
+  */
+void SystemClock_Config(void)
+{
+  RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+
+  /** Configure the main internal regulator output voltage
+  */
+  __HAL_RCC_PWR_CLK_ENABLE();
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 25;
+  RCC_OscInitStruct.PLL.PLLN = 192;
+  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
+  RCC_OscInitStruct.PLL.PLLQ = 4;
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
+  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
+  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
+  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
+  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
+
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
+/**
+  * @brief ADC1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_ADC1_Init(void)
+{
+
+  /* USER CODE BEGIN ADC1_Init 0 */
+
+  /* USER CODE END ADC1_Init 0 */
+
+  ADC_ChannelConfTypeDef sConfig = {0};
+
+  /* USER CODE BEGIN ADC1_Init 1 */
+
+  /* USER CODE END ADC1_Init 1 */
+
+  /** Configure the global features of the ADC (Clock, Resolution, Data Alignment and number of conversion)
+  */
+  hadc1.Instance = ADC1;
+  hadc1.Init.ClockPrescaler = ADC_CLOCK_SYNC_PCLK_DIV4;
+  hadc1.Init.Resolution = ADC_RESOLUTION_12B;
+  hadc1.Init.ScanConvMode = ENABLE;
+  hadc1.Init.ContinuousConvMode = DISABLE;
+  hadc1.Init.DiscontinuousConvMode = DISABLE;
+  hadc1.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
+  hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
+  hadc1.Init.DataAlign = ADC_DATAALIGN_RIGHT;
+  hadc1.Init.NbrOfConversion = 8;
+  hadc1.Init.DMAContinuousRequests = DISABLE;
+  hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
+  if (HAL_ADC_Init(&hadc1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_0;
+  sConfig.Rank = 1;
+  sConfig.SamplingTime = ADC_SAMPLETIME_56CYCLES;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_1;
+  sConfig.Rank = 2;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_2;
+  sConfig.Rank = 3;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_3;
+  sConfig.Rank = 4;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_4;
+  sConfig.Rank = 5;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_5;
+  sConfig.Rank = 6;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_6;
+  sConfig.Rank = 7;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure for the selected ADC regular channel its corresponding rank in the sequencer and its sample time.
+  */
+  sConfig.Channel = ADC_CHANNEL_7;
+  sConfig.Rank = 8;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN ADC1_Init 2 */
+
+  /* USER CODE END ADC1_Init 2 */
+
+}
+
+/**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.ClockSpeed = 400000;
+  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
+
+}
+
+/**
+  * @brief TIM3 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM3_Init(void)
+{
+
+  /* USER CODE BEGIN TIM3_Init 0 */
+
+  /* USER CODE END TIM3_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+
+  /* USER CODE BEGIN TIM3_Init 1 */
+
+  /* USER CODE END TIM3_Init 1 */
+  htim3.Instance = TIM3;
+  htim3.Init.Prescaler = 15;
+  htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim3.Init.Period = 59999;
+  htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim3, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim3, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_ConfigChannel(&htim3, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM3_Init 2 */
+
+  /* USER CODE END TIM3_Init 2 */
+  HAL_TIM_MspPostInit(&htim3);
+
+}
+
+/**
+  * @brief TIM10 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM10_Init(void)
+{
+
+  /* USER CODE BEGIN TIM10_Init 0 */
+
+  /* USER CODE END TIM10_Init 0 */
+
+  /* USER CODE BEGIN TIM10_Init 1 */
+
+  /* USER CODE END TIM10_Init 1 */
+  htim10.Instance = TIM10;
+  htim10.Init.Prescaler = 47;
+  htim10.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim10.Init.Period = 999;
+  htim10.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim10.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim10) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM10_Init 2 */
+
+  /* USER CODE END TIM10_Init 2 */
+
+}
+
+/**
+  * @brief TIM11 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM11_Init(void)
+{
+
+  /* USER CODE BEGIN TIM11_Init 0 */
+
+  /* USER CODE END TIM11_Init 0 */
+
+  /* USER CODE BEGIN TIM11_Init 1 */
+
+  /* USER CODE END TIM11_Init 1 */
+  htim11.Instance = TIM11;
+  htim11.Init.Prescaler = 0;
+  htim11.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim11.Init.Period = 23999;
+  htim11.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim11.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim11) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM11_Init 2 */
+
+  /* USER CODE END TIM11_Init 2 */
+
+}
+
+/**
+  * Enable DMA controller clock
+  */
+static void MX_DMA_Init(void)
+{
+
+  /* DMA controller clock enable */
+  __HAL_RCC_DMA2_CLK_ENABLE();
+  __HAL_RCC_DMA1_CLK_ENABLE();
+
+  /* DMA interrupt init */
+  /* DMA1_Stream0_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
+  /* DMA1_Stream1_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
+  /* DMA2_Stream0_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(DMA2_Stream0_IRQn, 0, 0);
+  HAL_NVIC_EnableIRQ(DMA2_Stream0_IRQn);
+
+}
+
+/**
+  * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_GPIO_Init(void)
+{
+  GPIO_InitTypeDef GPIO_InitStruct = {0};
+  /* USER CODE BEGIN MX_GPIO_Init_1 */
+
+  /* USER CODE END MX_GPIO_Init_1 */
+
+  /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOH_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(LED_BUILTIN_GPIO_Port, LED_BUILTIN_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(MOTOR_OUT_B_GPIO_Port, MOTOR_OUT_B_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOB, MOTOR_OUT_A_Pin|MOTOR2_OUT_A_Pin|MOTOR2_OUT_B_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : LED_BUILTIN_Pin */
+  GPIO_InitStruct.Pin = LED_BUILTIN_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(LED_BUILTIN_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : MOTOR_OUT_B_Pin */
+  GPIO_InitStruct.Pin = MOTOR_OUT_B_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(MOTOR_OUT_B_GPIO_Port, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : MOTOR_OUT_A_Pin MOTOR2_OUT_A_Pin MOTOR2_OUT_B_Pin */
+  GPIO_InitStruct.Pin = MOTOR_OUT_A_Pin|MOTOR2_OUT_A_Pin|MOTOR2_OUT_B_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+
+  /* USER CODE END MX_GPIO_Init_2 */
+}
+
+/* USER CODE BEGIN 4 */
+void serialTask(_sRx *dataRx, _sTx *dataTx)
+{
+	if(dataRx->isComannd){
+			dataRx->isComannd=FALSE;
+			decodeCommand(dataRx,dataTx);
+	    }
+	if(dataRx->indexR!=dataRx->indexW){
+	        decodeHeader(dataRx);
+	    }
+	if(dataTx->indexR!=dataTx->indexW){
+		if(dataTx->indexW > dataTx->indexR){
+				dataTx->bytesToTx = dataTx->indexW - dataTx->indexR;
+			}else{
+				dataTx->bytesToTx = sizeof(dataTx->buff) - dataTx->indexR;
+			}
+			if(CDC_Transmit_FS(&dataTx->buff[dataTx->indexR], dataTx->bytesToTx) == USBD_OK){
+				dataTx->indexR += dataTx->bytesToTx;
+			}
+	    }
+}
+uint8_t I2C_DMA_Transmit(uint16_t Dev_Address,uint16_t reg,uint8_t *p_Data, uint16_t _Size){
+
+	HAL_I2C_Mem_Write_DMA(&hi2c1, Dev_Address, reg, 1, p_Data, _Size);
+	return 1;
+}
+uint8_t I2C_1_Abstract_Master_Transmit_Blocking(uint16_t Dev_Address, uint8_t *p_Data, uint16_t _Size, uint32_t _Timeout){
+	return (uint8_t)HAL_I2C_Master_Transmit(&hi2c1, Dev_Address, p_Data, _Size, _Timeout);
+}
+uint8_t I2C_RBlocking(uint16_t DevAddress, uint16_t MemAddress, uint16_t MemAddSize, uint8_t *pData, uint16_t Size){
+
+	HAL_I2C_Mem_Read(&hi2c1, DevAddress, MemAddress, MemAddSize, pData, Size,1000);
+	return 1;
+
+}
+uint8_t I2C_DMA_Recive(uint16_t Dev_Address,uint16_t reg,uint8_t *p_Data, uint16_t _Size){
+	HAL_I2C_Mem_Read_DMA(&hi2c1, Dev_Address, reg, 1, p_Data, _Size);
+	return 1;
+}
+uint8_t I2C_1_Abstract_Mem_Write_Blocking(uint16_t Dev_Address, uint8_t Mem_Adress, uint8_t Mem_AddSize, uint8_t *p_Data, uint16_t _Size, uint32_t _Timeout){
+	return (uint8_t)HAL_I2C_Mem_Write(&hi2c1, Dev_Address, Mem_Adress, Mem_AddSize, p_Data, _Size, _Timeout);
+}
+/* USER CODE END 4 */
+
+/**
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+void Error_Handler(void)
+{
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
+  __disable_irq();
+  while (1)
+  {
+  }
+  /* USER CODE END Error_Handler_Debug */
+}
+
+#ifdef  USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */

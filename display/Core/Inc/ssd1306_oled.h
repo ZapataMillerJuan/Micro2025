@@ -2,7 +2,7 @@
 #define INC_SSD1306_OLED_H_
 
 #include "fonts.h"
-
+#include "stm32f4xx_hal.h"
 #ifndef SSD1306_I2C_ADDR
 #define SSD1306_I2C_ADDR	0x78
 //#define SSD1306_I2C_ADDR	0x7A

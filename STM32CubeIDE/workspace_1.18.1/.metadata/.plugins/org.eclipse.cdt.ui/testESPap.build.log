@@ -1,0 +1,22 @@
+19:15:59 **** Incremental Build of configuration Debug for project testESPap ****
+make -j12 all 
+arm-none-eabi-gcc -o "testESPap.elf" @"objects.list"   -mcpu=cortex-m4 -T"C:\Users\juanz\STM32CubeIDE\workspace_1.18.1\testESPap\STM32F411CEUX_FLASH.ld" --specs=nosys.specs -Wl,-Map="testESPap.map" -Wl,--gc-sections -static --specs=nano.specs -mfpu=fpv4-sp-d16 -mfloat-abi=hard -mthumb -Wl,--start-group -lc -lm -Wl,--end-group
+Finished building target: testESPap.elf
+ 
+arm-none-eabi-size  testESPap.elf 
+arm-none-eabi-objdump -h -S testESPap.elf  > "testESPap.list"
+arm-none-eabi-objcopy  -O ihex testESPap.elf  "testESPap.hex"
+   text	   data	    bss	    dec	    hex	filename
+  16840	     92	   1972	  18904	   49d8	testESPap.elf
+arm-none-eabi-objcopy  -O binary testESPap.elf  "testESPap.bin"
+Finished building: default.size.stdout
+ 
+Finished building: testESPap.list
+ 
+Finished building: testESPap.hex
+Finished building: testESPap.bin
+ 
+ 
+
+19:16:00 Build Finished. 0 errors, 0 warnings. (took 549ms)
+
